@@ -353,7 +353,25 @@
 
     /* ---------- 时间步 ---------- */
     maxDt: 1 / 30,            // 单帧最大时间（防止切后台后瞬移）
-    fixedStep: 1 / 120        // 固定物理步长
+    fixedStep: 1 / 120,       // 固定物理步长
+
+    /* ---------- 镜头与打击感 ---------- */
+    camPivotX: 240,           // 缩放焦点 X（取台面中轴）
+    camPivotY: 200,           // 缩放焦点 Y：略高于弧心，放大时把裁切量全留给底部死区
+    camMaxZoom: 1.04,         // 缩放上限。弧顶在 y=10，1.04 倍时映射到 y≈2.4，
+                              // 墙线刚好完整；再大会把顶部弧墙削掉一条
+    camDecay: 8.5,            // 缩放回落速度（每秒，越大回落越快）
+    shakeDecay: 26,           // 震屏衰减速度（沿用原值）
+    hitstopTarget: 0.07,      // 目标灯全亮时的命中停顿（秒）
+    hitstopOrbit: 0.06,       // 完整轨道结算时的命中停顿
+    hitstopMulti: 0.09,       // 多球触发的命中停顿
+    slowOrbitIn: 0.60,        // 入轨瞬间的减速倍率
+    slowOrbitInHold: 0.10,
+    slowOrbitOut: 0.45,       // 出轨道甩出的减速倍率
+    slowOrbitOutHold: 0.15,
+    slowMulti: 0.35,          // 多球减速倍率
+    slowMultiHold: 0.42,
+    slowReturn: 10            // 慢动作回到 1 的速度
   };
 
   const W = CONFIG.width;
@@ -635,6 +653,8 @@
       this.angle = this.restAngle;
       this.omega = 0;                          // 角速度，碰撞时参与反弹
       this.pressed = false;
+      this.wasPressed = false;                 // 上一帧的按下状态（用于检测上升沿）
+      this.glow = 0;                           // 按下瞬间的辉光余量 0~1
     }
 
     /** 计算挡板末端坐标 */
@@ -646,6 +666,11 @@
     }
 
     update(dt) {
+      // 上升沿触发辉光：按下挡板的那一下应该“亮”起来
+      if (this.pressed && !this.wasPressed) this.glow = 1;
+      this.wasPressed = this.pressed;
+      if (this.glow > 0) this.glow = Math.max(0, this.glow - dt * 5.5);
+
       if (dt <= 0) { this.omega = 0; return; }   // 防止异常时间步产生巨大角速度
       const target = this.pressed ? this.upAngle : this.restAngle;
       const speed = this.pressed ? CONFIG.flipperUpSpeed : CONFIG.flipperDownSpeed;
@@ -697,6 +722,8 @@
     combo: 0,
     comboTimer: 0,
     shake: 0,
+    hitstop: 0,            // 命中停顿剩余时间（只冻结物理，不冻结挡板）
+    rings: [],             // 冲击波环
     particles: [],
     texts: []
   };
@@ -817,6 +844,8 @@
         burst(b.x, b.y, '#ffd166', 14, 340);
         Sound.bumper();
         game.shake = Math.max(game.shake, 5);
+        punchZoom(1.018);
+        ring(o.x, o.y, '#ffd166', o.r * 0.55, o.r * 2.5, 0.30, 2.5);
         registerCombo(b.x, b.y);
       }
     }
@@ -888,6 +917,8 @@
         Sound.target();
         burst(o.x, o.y, '#a8ff3e', 16, 260);
         game.shake = Math.max(game.shake, 4);
+        punchZoom(1.022);
+        ring(o.x, o.y, '#a8ff3e', o.r * 0.6, o.r * 2.8, 0.32, 2);
         game.texts.push({ x: o.x, y: o.y - 28, life: 0.9, max: 0.9, text: '点亮', color: '#a8ff3e', size: 15 });
 
         // 全部亮起 → 加分，然后重置所有灯
@@ -905,6 +936,12 @@
           game.targetFlash = 1;
           Sound.bonus();
           game.shake = 11;
+          // 结算级事件：停顿 + 慢放 + 双重冲击波
+          hitstop(CONFIG.hitstopTarget);
+          punchZoom(1.04);
+          slowmo(0.5, 0.18);
+          ring(W / 2, 300, '#ffd166', 26, 215, 0.52, 4);
+          ring(W / 2, 300, '#fff6d0', 14, 132, 0.36, 1.8);
         }
       }
     }
@@ -951,6 +988,8 @@
         Sound.sling();
         burst(cx, cy, '#7dffc4', 9, 240);
         game.shake = Math.max(game.shake, 3);
+        punchZoom(1.012);
+        ring(cx, cy, '#7dffc4', 8, 48, 0.24, 2);
       }
     }
   }
@@ -1017,6 +1056,11 @@
 
       if (impact > 200) {
         burst(b.x, b.y, fl.side === 1 ? '#45f3ff' : '#ff4ce0', 6, 180);
+      }
+      // 只有“刚抬板打中”的强力撞击才推镜头，避免贴板摩擦时反复触发
+      if (impact > 330 && fl.glow > 0.55) {
+        punchZoom(1.012);
+        ring(b.x, b.y, fl.side === 1 ? '#45f3ff' : '#ff4ce0', 7, 42, 0.22, 2);
       }
     }
   }
@@ -1101,6 +1145,10 @@
     ORBIT.flash = 1;
     Sound.orbitIn();
     burst(p.x, p.y, '#ffd166', 10, 210);
+    // 入轨的一瞬间“卡”一下：短促减速比长时间慢放更好看
+    slowmo(CONFIG.slowOrbitIn, CONFIG.slowOrbitInHold);
+    punchZoom(1.02);
+    ring(p.x, p.y, '#ffd166', 10, 62, 0.28, 2);
     game.texts.push({ x: p.x - 30, y: p.y + 10, life: 0.9, max: 0.9, text: '进入轨道', color: '#ffd166', size: 13 });
     return true;
   }
@@ -1154,6 +1202,11 @@
     game.texts.push({ x: p.x + 44, y: p.y + 14, life: 1.2, max: 1.2, text: '完整轨道', color: '#7ef9ff', size: 15 });
     Sound.orbitDone();
     game.shake = Math.max(game.shake, 5);
+    // 出轨道是整个奖励的高潮：停顿一下再甩出去
+    hitstop(CONFIG.hitstopOrbit);
+    punchZoom(1.035);
+    slowmo(CONFIG.slowOrbitOut, CONFIG.slowOrbitOutHold);
+    ring(p.x, p.y, '#7ef9ff', 14, 118, 0.42, 3);
 
     startMultiball(p);
   }
@@ -1186,6 +1239,12 @@
     burst(W / 2, 232, '#ff7bee', 30, 380);
     Sound.multiball();
     game.shake = 13;
+    // 全场最强的一击：停顿 + 最深慢放 + 最大冲击波
+    hitstop(CONFIG.hitstopMulti);
+    punchZoom(1.04);
+    slowmo(CONFIG.slowMulti, CONFIG.slowMultiHold);
+    ring(W / 2, 232, '#ff7bee', 18, 268, 0.66, 4);
+    ring(W / 2, 232, '#ffd8f6', 10, 150, 0.44, 2);
   }
 
   function simulate(step) {
@@ -1266,6 +1325,51 @@
   }
 
   /* =========================================================================
+   * 8.5 镜头与打击感（zoom punch / hitstop / 慢动作 / 冲击波环）
+   *     三条时间线刻意分开：
+   *       realDt —— 挡板、输入、冷却：永不冻结，保证操作永远跟手
+   *       simDt  —— 物理：受 hitstop 与慢动作影响
+   *       camera —— 只用 realDt：命中停顿期间镜头仍在回弹，冲击才“有劲”
+   * ========================================================================= */
+
+  /** 镜头状态：只放大不缩小，缩放低于 1 会在画布边缘露出空白 */
+  const cam = { zoom: 1, px: CONFIG.camPivotX, py: CONFIG.camPivotY };
+
+  /** 慢动作状态：slow 为当前倍率（1 = 正常），slowWant 为目标倍率 */
+  const fx = { slow: 1, slowWant: 1, slowHold: 0 };
+
+  /** 镜头推近：取最大值而不是叠加，连续撞击不会把画面越推越远 */
+  function punchZoom(z) {
+    const v = Math.min(z, CONFIG.camMaxZoom);
+    if (v > cam.zoom) cam.zoom = v;
+  }
+
+  /** 命中停顿：只对“机械/结算”级事件使用，普通碰撞用它会让画面发抖 */
+  function hitstop(t) {
+    if (t > game.hitstop) game.hitstop = t;
+  }
+
+  /** 慢动作：立即进入最慢值，保持 hold 秒后自动回到 1 */
+  function slowmo(scale, hold) {
+    if (scale >= 1 || hold <= 0) return;
+    if (scale < fx.slow) fx.slow = scale;
+    fx.slowWant = scale;
+    if (hold > fx.slowHold) fx.slowHold = hold;
+  }
+
+  /** 冲击波环：r0 → r1 缓出扩散 */
+  function ring(x, y, color, r0, r1, life, width) {
+    if (game.rings.length >= 14) return;
+    game.rings.push({
+      x: x, y: y,
+      r0: r0, r1: r1,
+      life: life, max: life,
+      color: color,
+      width: width || 2
+    });
+  }
+
+  /* =========================================================================
    * 9. 状态流转
    * ========================================================================= */
   function newBall() {
@@ -1277,6 +1381,13 @@
     game.charging = false;
     game.acc = 0;
     game.respawn = 0;
+    // 装填时把镜头与慢动作彻底归位，避免上一颗球的余韵带进来
+    game.hitstop = 0;
+    game.rings.length = 0;
+    cam.zoom = 1;
+    fx.slow = 1;
+    fx.slowWant = 1;
+    fx.slowHold = 0;
     game.state = 'READY';
     leftFlipper.pressed = false;
     rightFlipper.pressed = false;
@@ -1294,8 +1405,14 @@
     game.multiballCount = 0;
     game.orbitCount = 0;
     game.targetFlash = 0;
+    game.hitstop = 0;
+    game.rings.length = 0;
     game.particles.length = 0;
     game.texts.length = 0;
+    cam.zoom = 1;
+    fx.slow = 1;
+    fx.slowWant = 1;
+    fx.slowHold = 0;
     for (let i = 0; i < BUMPERS.length; i++) { BUMPERS[i].pulse = 0; BUMPERS[i].cool = 0; }
     for (let i = 0; i < PEGS.length; i++) { PEGS[i].cool = 0; }
     for (let i = 0; i < TARGETS.length; i++) { TARGETS[i].lit = false; TARGETS[i].cool = 0; }
@@ -1303,6 +1420,8 @@
     ORBIT.flash = 0;
     leftFlipper.angle = leftFlipper.restAngle;
     rightFlipper.angle = rightFlipper.restAngle;
+    leftFlipper.glow = 0;
+    rightFlipper.glow = 0;
     newBall();
   }
 
@@ -1410,11 +1529,39 @@
   function update(dt) {
     if (game.state === 'PAUSED') return;
 
-    // 挡板
+    /* ---- 时间分层 ----
+     * dt      挡板 / 相机 / 冷却：永不冻结，保证操作始终跟手
+     * simDt   物理 / 粒子 / 闪光：受命中停顿与慢动作影响
+     * 关键：hitstop 期间挡板必须照常推进。若把挡板一起冻住，
+     *       Flipper.update(0) 会把 omega 归零，下一次碰撞就读不到
+     *       旋转线速度，弹射力凭空消失——手感会变成打棉花。 */
+    let simDt;
+    if (game.hitstop > 0) {
+      game.hitstop = Math.max(0, game.hitstop - dt);
+      simDt = 0;
+    } else {
+      simDt = dt * fx.slow;
+    }
+
+    // 慢动作淡入淡出用真实时间驱动，否则减速会把自己的恢复过程也拖慢
+    if (fx.slowHold > 0) {
+      fx.slowHold -= dt;
+      if (fx.slowHold <= 0) fx.slowWant = 1;
+    }
+    fx.slow += (fx.slowWant - fx.slow) * (1 - Math.exp(-dt * CONFIG.slowReturn));
+
+    // 镜头回落（帧率无关的指数逼近）
+    if (cam.zoom > 1) {
+      cam.zoom += (1 - cam.zoom) * (1 - Math.exp(-dt * CONFIG.camDecay));
+      if (cam.zoom < 1.0005) cam.zoom = 1;
+    }
+    if (game.shake > 0) game.shake = Math.max(0, game.shake - dt * CONFIG.shakeDecay);
+
+    // 挡板（真实时间）
     leftFlipper.update(dt);
     rightFlipper.update(dt);
 
-    // 各类计时器
+    // 各类计时器：玩法冷却走真实时间，视觉衰减走 simDt
     if (game.comboTimer > 0) {
       game.comboTimer -= dt;
       if (game.comboTimer <= 0) game.combo = 0;
@@ -1422,14 +1569,14 @@
     for (let i = 0; i < BUMPERS.length; i++) {
       const o = BUMPERS[i];
       if (o.cool > 0) o.cool -= dt;
-      if (o.pulse > 0) o.pulse = Math.max(0, o.pulse - dt * 2.6);
+      if (o.pulse > 0) o.pulse = Math.max(0, o.pulse - simDt * 2.6);
     }
     for (let i = 0; i < PEGS.length; i++) if (PEGS[i].cool > 0) PEGS[i].cool -= dt;
     for (let i = 0; i < TARGETS.length; i++) if (TARGETS[i].cool > 0) TARGETS[i].cool -= dt;
-    for (let i = 0; i < SLINGS.length; i++) if (SLINGS[i].flash > 0) SLINGS[i].flash = Math.max(0, SLINGS[i].flash - dt * 3.4);
+    for (let i = 0; i < SLINGS.length; i++) if (SLINGS[i].flash > 0) SLINGS[i].flash = Math.max(0, SLINGS[i].flash - simDt * 3.4);
     if (game.multiballCool > 0) game.multiballCool = Math.max(0, game.multiballCool - dt);
-    if (game.targetFlash > 0) game.targetFlash = Math.max(0, game.targetFlash - dt * 1.6);
-    if (ORBIT.flash > 0) ORBIT.flash = Math.max(0, ORBIT.flash - dt * 2.2);
+    if (game.targetFlash > 0) game.targetFlash = Math.max(0, game.targetFlash - simDt * 1.6);
+    if (ORBIT.flash > 0) ORBIT.flash = Math.max(0, ORBIT.flash - simDt * 2.2);
 
     // 蓄力
     if (game.state === 'READY' && game.charging) {
@@ -1438,7 +1585,7 @@
 
     // 物理
     if (game.state === 'PLAYING' && game.balls.length) {
-      game.acc += dt;
+      game.acc += simDt;
       let guard = 0;
       while (game.acc >= CONFIG.fixedStep && guard < 8) {
         simulate(CONFIG.fixedStep);
@@ -1448,10 +1595,13 @@
       if (guard >= 8) game.acc = 0;
 
       // 拖尾 + 掉球判定（倒序遍历，移除后不影响索引）
+      // 命中停顿期间球不会移动，此时再压拖尾点会叠出一坨亮点，必须跳过
       for (let i = game.balls.length - 1; i >= 0; i--) {
         const b = game.balls[i];
-        b.trail.push({ x: b.x, y: b.y });
-        if (b.trail.length > 12) b.trail.shift();
+        if (simDt > 0) {
+          b.trail.push({ x: b.x, y: b.y });
+          if (b.trail.length > 12) b.trail.shift();
+        }
         if (!b.rail && b.y > H - 24) removeBall(b);
       }
     }
@@ -1462,30 +1612,35 @@
       if (game.respawn <= 0) newBall();
     }
 
-    // 粒子
+    // 粒子（跟随 simDt：命中停顿时整片火花一起静止，冲击帧才够硬）
     const ps = game.particles;
     for (let i = ps.length - 1; i >= 0; i--) {
       const p = ps[i];
-      p.life -= dt;
+      p.life -= simDt;
       if (p.life <= 0) { ps.splice(i, 1); continue; }
-      p.vy += 620 * dt;
-      p.vx *= 0.985;
-      p.vy *= 0.985;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
+      p.vy += 620 * simDt;
+      p.vx *= Math.pow(0.985, simDt * 60);
+      p.vy *= Math.pow(0.985, simDt * 60);
+      p.x += p.vx * simDt;
+      p.y += p.vy * simDt;
+    }
+
+    // 冲击波环
+    const rs = game.rings;
+    for (let i = rs.length - 1; i >= 0; i--) {
+      const r = rs[i];
+      r.life -= simDt;
+      if (r.life <= 0) rs.splice(i, 1);
     }
 
     // 飘字
     const ts = game.texts;
     for (let i = ts.length - 1; i >= 0; i--) {
       const t = ts[i];
-      t.life -= dt;
-      t.y -= 42 * dt;
+      t.life -= simDt;
+      t.y -= 42 * simDt;
       if (t.life <= 0) ts.splice(i, 1);
     }
-
-    // 震屏衰减
-    if (game.shake > 0) game.shake = Math.max(0, game.shake - dt * 26);
 
     syncHUD(false);
   }
@@ -1495,20 +1650,28 @@
    * ========================================================================= */
   const view = { sx: 1, sy: 1 };
 
+  /**
+   * 暂停时是否需要重绘。
+   * 暂停画面是静止的，但 overlay 带 backdrop-filter，只要 canvas 持续重绘，
+   * 浏览器就会每帧重新模糊整张画布。停掉绘制能省下这部分开销。
+   */
+  let needRedraw = true;
+
   function drawBackground() {
     const g = ctx.createRadialGradient(W / 2, 240, 40, W / 2, 420, 640);
     g.addColorStop(0, '#121d3c');
     g.addColorStop(0.55, '#0a0f22');
     g.addColorStop(1, '#04050b');
     ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
+    // 比画布外扩一圈：震屏 / 镜头推近时边缘不会露出 CSS 背景
+    ctx.fillRect(-24, -24, W + 48, H + 48);
 
     // 网格
     ctx.strokeStyle = 'rgba(80,150,255,0.05)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let x = 30; x <= 450; x += 30) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
-    for (let y = 20; y <= H; y += 30) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    for (let x = 30; x <= 450; x += 30) { ctx.moveTo(x, -24); ctx.lineTo(x, H + 24); }
+    for (let y = -20; y <= H + 24; y += 30) { ctx.moveTo(-24, y); ctx.lineTo(W + 24, y); }
     ctx.stroke();
 
     // 顶部光晕
@@ -1516,7 +1679,7 @@
     g2.addColorStop(0, 'rgba(60,160,255,0.16)');
     g2.addColorStop(1, 'rgba(60,160,255,0)');
     ctx.fillStyle = g2;
-    ctx.fillRect(0, 0, W, 440);
+    ctx.fillRect(-24, -24, W + 48, 488);
   }
 
   function drawDrainZone() {
@@ -1849,11 +2012,12 @@
       const fl = list[i];
       const tip = fl.tip();
       const color = fl.side === 1 ? '#45f3ff' : '#ff4ce0';
+      const g = fl.glow;                       // 刚抬板那一下的辉光余量 0~1
 
       ctx.save();
       ctx.lineCap = 'round';
       ctx.shadowColor = color;
-      ctx.shadowBlur = 20;
+      ctx.shadowBlur = 20 + g * 24;
       ctx.lineWidth = fl.thick * 2;
       ctx.strokeStyle = color;
       ctx.beginPath();
@@ -1863,8 +2027,8 @@
 
       // 高光
       ctx.shadowBlur = 0;
-      ctx.lineWidth = fl.thick * 0.85;
-      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = fl.thick * (0.85 + g * 0.35);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.6 + g * 0.35) + ')';
       ctx.beginPath();
       ctx.moveTo(fl.pivot.x, fl.pivot.y);
       ctx.lineTo(tip.x, tip.y);
@@ -1916,15 +2080,66 @@
     ctx.restore();
   }
 
+  /**
+   * 线状火花：沿速度方向拉出短拖尾，而不是画圆点。
+   * 同样的粒子数，能量感强一个档次；尾巴长度按速度衰减，
+   * 停下来以后自然退化成小亮点，不会变成一根卡住的短棍。
+   */
   function drawParticles() {
-    for (let i = 0; i < game.particles.length; i++) {
-      const p = game.particles[i];
+    const ps = game.particles;
+    if (!ps.length) return;
+
+    ctx.lineCap = 'round';
+    for (let i = 0; i < ps.length; i++) {
+      const p = ps[i];
       const a = clamp(p.life / p.max, 0, 1);
+
+      // 刚喷出来的火花是白热的核心，冷却后回到自身颜色
+      ctx.strokeStyle = a > 0.72 ? '#ffffff' : p.color;
+      ctx.fillStyle = ctx.strokeStyle;
       ctx.globalAlpha = a;
-      ctx.fillStyle = p.color;
+
+      const sp = Math.hypot(p.vx, p.vy);
+      if (sp < 26) {
+        // 速度已经很小 → 画成亮点
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * 0.55, 0, TAU);
+        ctx.fill();
+        continue;
+      }
+
+      // 尾巴长度 ∝ 速度，并夹一个上限，避免高速火花拉成一道长线
+      const len = Math.min(sp * 0.026, 16);
+      const tx = p.x - (p.vx / sp) * len;
+      const ty = p.y - (p.vy / sp) * len;
+
+      ctx.lineWidth = p.r * 0.8 * (0.45 + a * 0.55);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r * (0.4 + a * 0.8), 0, TAU);
-      ctx.fill();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.lineCap = 'butt';
+  }
+
+  /** 冲击波环：缓出扩散 + 快速淡出 */
+  function drawRings() {
+    const rs = game.rings;
+    if (!rs.length) return;
+    for (let i = 0; i < rs.length; i++) {
+      const r = rs[i];
+      const k = 1 - r.life / r.max;          // 0 → 1
+      const e = 1 - (1 - k) * (1 - k);       // 缓出：起手快、收尾慢
+      const rad = r.r0 + (r.r1 - r.r0) * e;
+      const a = (1 - k) * (1 - k);
+      if (a <= 0.01) continue;
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = r.color;
+      ctx.lineWidth = r.width * (1 - k * 0.7);
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, rad, 0, TAU);
+      ctx.stroke();
     }
     ctx.globalAlpha = 1;
   }
@@ -2042,6 +2257,15 @@
     ctx.clearRect(0, 0, W, H);
 
     ctx.save();
+
+    // 镜头推近：焦点固定在弧心。只放大不缩小——缩小会在画布边缘露出空白
+    if (cam.zoom > 1.0005) {
+      ctx.translate(cam.px, cam.py);
+      ctx.scale(cam.zoom, cam.zoom);
+      ctx.translate(-cam.px, -cam.py);
+    }
+
+    // 震屏放在缩放之后，用屏幕像素位移，避免被缩放一起放大
     if (game.shake > 0.2) {
       ctx.translate(rand(-game.shake, game.shake) * 0.6, rand(-game.shake, game.shake) * 0.6);
     }
@@ -2059,6 +2283,7 @@
     if (game.state === 'READY') drawAim();
     drawBall();
     drawParticles();
+    drawRings();
     drawTexts();
     drawHints();
 
@@ -2129,6 +2354,9 @@
 
     overlayEl.style.width = cw + 'px';
     overlayEl.style.height = ch + 'px';
+
+    // 改尺寸会清空画布，暂停中的静止帧必须重画一次
+    needRedraw = true;
   }
 
   function bindHold(el, onDown, onUp) {
@@ -2277,7 +2505,15 @@
       const dt = Math.max(0, Math.min((now - lastTime) / 1000, CONFIG.maxDt));
       lastTime = now;
       update(dt);
-      render();
+
+      // 暂停时只补画一帧，之后停掉绘制
+      if (game.state === 'PAUSED' && !needRedraw) {
+        // 什么都不画
+      } else {
+        render();
+        needRedraw = false;
+      }
+
       requestAnimationFrame(loop);
     }
     requestAnimationFrame(loop);
