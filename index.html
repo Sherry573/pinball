@@ -310,7 +310,7 @@
     flipperLength: 95,
     flipperThickness: 8.5,    // 胶囊半径
     flipperUpSpeed: 14,       // 抬升角速度 rad/s
-    flipperDownSpeed: 11,     // 回落角速度 rad/s
+    flipperDownSpeed: 8,      // 回落角速度 rad/s（过快会把球“抽”下去）
     leftRest: 0.34,           // 左挡板静止角（弧度，向下偏）
     leftUp: -0.52,            // 左挡板抬起角
     rightRest: Math.PI - 0.34,
@@ -323,9 +323,10 @@
     chargeTime: 1.05,         // 蓄满力所需时间（秒）
 
     /* ---------- 防卡死 ---------- */
-    stuckSpeed: 45,           // 判定“几乎静止”的速度阈值
-    stuckTime: 2.0,           // 连续低速多久后施予随机冲量
-    antiStuckKick: 200,       // 随机冲量大小
+    stuckWindow: 1.5,         // 位置检测窗口（秒）
+    stuckMove: 16,            // 窗口内位移小于该值即判定为“卡住”
+    antiStuckKick: 420,       // 脱困冲量
+    stuckLimit: 3,            // 连续卡住多少次后直接把球送回场中
 
     /* ---------- 计分规则 ---------- */
     startBalls: 3,
@@ -549,6 +550,7 @@
     }
 
     update(dt) {
+      if (dt <= 0) { this.omega = 0; return; }   // 防止异常时间步产生巨大角速度
       const target = this.pressed ? this.upAngle : this.restAngle;
       const speed = this.pressed ? CONFIG.flipperUpSpeed : CONFIG.flipperDownSpeed;
       const prev = this.angle;
@@ -629,8 +631,10 @@
         const vt = b.vx * tx + b.vy * ty;
         b.vx -= (1 + e) * vn * n.x;
         b.vy -= (1 + e) * vn * n.y;
-        b.vx -= vt * tx * CONFIG.wallFriction;
-        b.vy -= vt * ty * CONFIG.wallFriction;
+        // 同样按冲击强度缩放摩擦，避免球沿斜坡“匍匐”而不是顺畅滚落
+        const fr = CONFIG.wallFriction * Math.min(1, impact / 110);
+        b.vx -= vt * tx * fr;
+        b.vy -= vt * ty * fr;
         if (impact > 320) Sound.wall();
       }
     }
@@ -880,11 +884,15 @@
       const ty = nx;
       const vt = rvx * tx + rvy * ty;
 
+      // 切向摩擦按冲击强度缩放：轻轻贴合时几乎不产生摩擦，
+      // 否则球会被“粘”在挡板上以极低速匍匐，看起来像卡住
+      const fr = CONFIG.flipperFriction * Math.min(1, impact / 110);
+
       const nvx = rvx - (1 + e) * vn * nx;
       const nvy = rvy - (1 + e) * vn * ny;
 
-      b.vx = nvx - vt * tx * CONFIG.flipperFriction + svx;
-      b.vy = nvy - vt * ty * CONFIG.flipperFriction + svy;
+      b.vx = nvx - vt * tx * fr + svx;
+      b.vy = nvy - vt * ty * fr + svy;
       limitSpeed(b, CONFIG.maxSpeed);
 
       if (impact > 200) {
@@ -893,21 +901,46 @@
     }
   }
 
-  /** 防卡死：长时间低速则给一个向上的轻微随机冲量 */
+  /**
+   * 防卡死（基于“位移”而不是“速度”判断）
+   * 球被楔在挡板/墙角时速度可能有几十 px/s 的抖动，用速度阈值判断会漏掉；
+   * 这里改为：每 stuckWindow 秒检查一次球移动了多远，几乎没动就施予冲量。
+   */
   function antiStuck(b, h) {
-    const sp = Math.hypot(b.vx, b.vy);
-    if (sp < CONFIG.stuckSpeed && b.y < 690) {
-      b.slowTime += h;
-      if (b.slowTime > CONFIG.stuckTime) {
-        b.slowTime = 0;
-        const a = rand(-Math.PI * 0.85, -Math.PI * 0.15);   // 随机朝上
-        b.vx += Math.cos(a) * CONFIG.antiStuckKick;
-        b.vy += Math.sin(a) * CONFIG.antiStuckKick;
-        burst(b.x, b.y, '#9ad4ff', 8, 170);
-      }
-    } else {
-      b.slowTime = Math.max(0, b.slowTime - h * 2);
+    b.stuckTime += h;
+    if (b.stuckTime < CONFIG.stuckWindow) return;
+
+    const moved = Math.hypot(b.x - b.stuckRefX, b.y - b.stuckRefY);
+    b.stuckTime = 0;
+    b.stuckRefX = b.x;
+    b.stuckRefY = b.y;
+
+    if (moved >= CONFIG.stuckMove) {
+      b.stuckCount = 0;
+      return;
     }
+
+    b.stuckCount += 1;
+
+    if (b.stuckCount >= CONFIG.stuckLimit) {
+      // 连续多次无效 → 直接把球放回场中安全位置
+      b.stuckCount = 0;
+      b.x = 240 + rand(-40, 40);
+      b.y = 610;
+      b.vx = rand(-90, 90);
+      b.vy = 80;
+      burst(b.x, b.y, '#9ad4ff', 14, 220);
+      return;
+    }
+
+    // 朝台面中心方向弹一下，确保能离开楔住的角落
+    const dx = 240 - b.x;
+    const dy = 420 - b.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const ang = Math.atan2(dy / d, dx / d) + rand(-0.45, 0.45);
+    b.vx = Math.cos(ang) * CONFIG.antiStuckKick;
+    b.vy = Math.sin(ang) * CONFIG.antiStuckKick;
+    burst(b.x, b.y, '#9ad4ff', 10, 200);
   }
 
   /* =========================================================================
@@ -993,7 +1026,10 @@
       vy: 0,
       r: CONFIG.ballRadius,
       trail: [],
-      slowTime: 0
+      stuckRefX: BALL_START.x,
+      stuckRefY: BALL_START.y,
+      stuckTime: 0,
+      stuckCount: 0
     };
     game.power = 0;
     game.charging = false;
@@ -1837,7 +1873,8 @@
 
     let lastTime = performance.now();
     function loop(now) {
-      const dt = Math.min((now - lastTime) / 1000, CONFIG.maxDt);
+      // 夹紧时间步：切后台 / 时间戳异常时不会产生负值或超大步长
+      const dt = Math.max(0, Math.min((now - lastTime) / 1000, CONFIG.maxDt));
       lastTime = now;
       update(dt);
       render();
