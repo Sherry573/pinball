@@ -333,7 +333,6 @@
     bumperScore: 100,
     pegScore: 10,
     targetScore: 500,
-    extraBall: 1,             // 点亮全部目标灯奖励的球数
     comboWindow: 1.5,         // 连击统计窗口（秒）
 
     /* ---------- 弧形轨道（Orbit） ---------- */
@@ -528,7 +527,7 @@
     { x: 340, y: 560, r: 6, cool: 0 }
   ];
 
-  /** 目标灯（两个全亮 +500 并重置） */
+  /** 目标灯（全部亮起 +500 并重置） */
   const TARGETS = [
     { x: 80, y: 400, r: 15, lit: false, cool: 0 },
     { x: 400, y: 400, r: 15, lit: false, cool: 0 }
@@ -860,7 +859,7 @@
     }
   }
 
-  /** 圆 vs 目标灯（两个全亮 +500 并重置） */
+  /** 圆 vs 目标灯（全部亮起 +500 并重置） */
   function collideTargets(b) {
     for (let i = 0; i < TARGETS.length; i++) {
       const o = TARGETS[i];
@@ -891,7 +890,7 @@
         game.shake = Math.max(game.shake, 4);
         game.texts.push({ x: o.x, y: o.y - 28, life: 0.9, max: 0.9, text: '点亮', color: '#a8ff3e', size: 15 });
 
-        // 全部亮起 → 加分 + 奖励 1 颗备用球，然后重置所有灯
+        // 全部亮起 → 加分，然后重置所有灯
         let all = true;
         for (let k = 0; k < TARGETS.length; k++) if (!TARGETS[k].lit) all = false;
         if (all) {
@@ -900,10 +899,7 @@
             TARGETS[k].cool = 0.9;
           }
           addScore(CONFIG.targetScore, W / 2, 300, '#ffd166');
-          game.lives += CONFIG.extraBall;
-          syncHUD(true);
           game.texts.push({ x: W / 2, y: 256, life: 1.7, max: 1.7, text: '全部点亮 +500', color: '#ffd166', size: 22 });
-          game.texts.push({ x: W / 2, y: 284, life: 1.7, max: 1.7, text: '奖励 1 球', color: '#7ef9ff', size: 17 });
           burst(W / 2, 300, '#ffd166', 44, 430);
           // 灯全部亮起的瞬间抬高整组灯的光效
           game.targetFlash = 1;
@@ -1994,7 +1990,7 @@
   function drawHints() {
     if (game.state === 'READY') {
       const l1 = '按住 空格 / 发射 键蓄力 · 松开发射';
-      const l2 = '点亮全部目标灯 +1 球 · 走完弧形轨道触发多球';
+      const l2 = '点亮全部目标灯 +500 · 走完弧形轨道触发多球';
       const FONT = 'system-ui, "PingFang SC", "Microsoft YaHei", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
