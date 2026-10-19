@@ -329,11 +329,28 @@
     stuckLimit: 3,            // 连续卡住多少次后直接把球送回场中
 
     /* ---------- 计分规则 ---------- */
-    startBalls: 3,
+    startBalls: 3,            // 开局备球数（掉光所有球才扣 1）
     bumperScore: 100,
     pegScore: 10,
     targetScore: 500,
+    extraBall: 1,             // 点亮全部目标灯奖励的球数
     comboWindow: 1.5,         // 连击统计窗口（秒）
+
+    /* ---------- 弧形轨道（Orbit） ---------- */
+    orbitScore: 40,           // 轨道上每经过一个计分点的分数
+    orbitPoints: 8,           // 轨道计分点数量
+    orbitBonus: 200,          // 走完全程的额外奖励
+    orbitSpeed: 640,          // 轨道上的滑行速度 px/s
+    orbitMinSpeed: 520,       // 进入轨道后的最低滑行速度
+    orbitMaxSpeed: 820,       // 进入轨道后的最高滑行速度
+    orbitCaptureSpeed: 130,   // 进入轨道所需的最低速度
+    orbitGate: 34,            // 入口捕获半径
+    orbitGateDot: 0.25,       // 速度方向与轨道切向的最小余弦（必须“顺着”飞入）
+
+    /* ---------- 多球模式 ---------- */
+    multiballExtra: 2,        // 触发时额外放出的球数
+    maxBallsOnField: 3,       // 场上同时存在的球数上限
+    multiballCool: 10,        // 多球冷却（秒），避免连续触发
 
     /* ---------- 时间步 ---------- */
     maxDt: 1 / 30,            // 单帧最大时间（防止切后台后瞬移）
@@ -429,6 +446,11 @@
     peg() { this.tone(980, 0.05, 'triangle', 0.045, 1400); },
     target() { this.tone(680, 0.16, 'triangle', 0.08, 1280); },
     sling() { this.tone(430, 0.08, 'square', 0.055, 820); },
+    orbitStep() { this.tone(760, 0.06, 'sine', 0.05, 1080); },
+    orbitIn() { this.tone(300, 0.16, 'sine', 0.05, 900); },
+    orbitDone() { this.seq([784, 988, 1175, 1568], 0.06, 'triangle', 0.075); },
+    multiball() { this.seq([523, 784, 1046, 784, 1046, 1318], 0.085, 'square', 0.06); },
+    ballLost() { this.tone(420, 0.22, 'sawtooth', 0.045, 180); },
     bonus() { this.seq([523, 659, 784, 1046, 1318], 0.075, 'triangle', 0.075); },
     flipper() { this.tone(150, 0.055, 'sawtooth', 0.045, 90); },
     drain() { this.tone(320, 0.55, 'sawtooth', 0.06, 64); },
@@ -492,8 +514,8 @@
 
   /** 小钉子（击中 +10 分） */
   const PEGS = [
-    { x: 75, y: 300, r: 6, cool: 0 },
-    { x: 405, y: 300, r: 6, cool: 0 },
+    { x: 100, y: 296, r: 6, cool: 0 },
+    { x: 380, y: 296, r: 6, cool: 0 },
     { x: 140, y: 440, r: 6, cool: 0 },
     { x: 240, y: 440, r: 6, cool: 0 },
     { x: 340, y: 440, r: 6, cool: 0 },
@@ -522,7 +544,82 @@
   ];
 
   /** 发射口位置（顶部右侧） */
-  const BALL_START = { x: 398, y: 150 };
+  const BALL_START = { x: 392, y: 200 };
+
+  /* -------------------------------------------------------------------------
+   * 弧形轨道（Orbit）
+   *   与顶部弧形墙同心的一段内圈轨道：右下入口 → 越过顶端 → 左上出口
+   *   实现方式：先用参数方程采样出一串“路径点”，球进入后脱离物理，
+   *   位置由参数 t ∈ [0,1] 沿路径点线性插值得到，切向用于出口速度
+   * ---------------------------------------------------------------------- */
+  const ORBIT = {
+    cx: 240, cy: 220, r: 190,     // 圆心与轨道半径（弧墙半径 210，留出球径）
+    a0: 0.75,                     // 入口角度（右下方，角度以向右为 0、向下为正）
+    a1: -(Math.PI - 0.75),        // 出口角度（左上方），沿上半圈反向绕行半圈
+    pts: [],                      // 路径点
+    acc: [],                      // 各路径点到入口的累计长度
+    total: 1,                     // 轨道总长
+    flash: 0                      // 进球时的整体高亮
+  };
+
+  (function buildOrbit() {
+    const SEG = 64;
+    for (let i = 0; i <= SEG; i++) {
+      const a = ORBIT.a0 + (ORBIT.a1 - ORBIT.a0) * (i / SEG);
+      ORBIT.pts.push({
+        x: ORBIT.cx + Math.cos(a) * ORBIT.r,
+        y: ORBIT.cy + Math.sin(a) * ORBIT.r
+      });
+    }
+    ORBIT.acc.push(0);
+    let sum = 0;
+    for (let i = 1; i < ORBIT.pts.length; i++) {
+      sum += Math.hypot(ORBIT.pts[i].x - ORBIT.pts[i - 1].x, ORBIT.pts[i].y - ORBIT.pts[i - 1].y);
+      ORBIT.acc.push(sum);
+    }
+    ORBIT.total = sum || 1;
+  })();
+
+  ORBIT.entry = ORBIT.pts[0];
+  ORBIT.exit = ORBIT.pts[ORBIT.pts.length - 1];
+
+  /**
+   * 参数 t → 轨道上的位置与切向（沿路径点插值，匀速）
+   * 返回 { x, y, tx, ty }，tx/ty 为前进方向的单位向量
+   */
+  function orbitAt(t) {
+    const pts = ORBIT.pts;
+    const d = clamp(t, 0, 1) * ORBIT.total;
+    let i = 1;
+    while (i < ORBIT.acc.length - 1 && ORBIT.acc[i] < d) i++;
+    const segLen = ORBIT.acc[i] - ORBIT.acc[i - 1];
+    const k = segLen > 0 ? clamp((d - ORBIT.acc[i - 1]) / segLen, 0, 1) : 0;
+    const p0 = pts[i - 1];
+    const p1 = pts[i];
+    const dx = p1.x - p0.x;
+    const dy = p1.y - p0.y;
+    const l = Math.hypot(dx, dy) || 1;
+    return {
+      x: p0.x + dx * k,
+      y: p0.y + dy * k,
+      tx: dx / l,
+      ty: dy / l
+    };
+  }
+
+  /** 把位置投影到轨道上，返回最近的参数 t（用于入轨时避免瞬移） */
+  function orbitProject(x, y) {
+    let best = 1e9;
+    let bt = 0;
+    for (let i = 0; i < ORBIT.pts.length; i++) {
+      const dx = x - ORBIT.pts[i].x;
+      const dy = y - ORBIT.pts[i].y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < best) { best = d2; bt = i / (ORBIT.pts.length - 1); }
+    }
+    return bt;
+  }
+
 
   /* =========================================================================
    * 4. 挡板类
@@ -588,18 +685,40 @@
     prevState: 'READY',
     score: 0,
     best: loadBest(),
-    balls: CONFIG.startBalls,
+    lives: CONFIG.startBalls,  // 剩余备球（场上的球全掉光才扣 1）
+    balls: [],                 // 场上的球，支持多球模式
     power: 0,              // 蓄力 0~1
     charging: false,
-    ball: null,
     acc: 0,                // 物理累积时间
     respawn: 0,            // 掉球后重新装填倒计时
+    multiballCool: 0,      // 多球冷却
+    multiballCount: 0,     // 本局触发多球的次数
+    orbitCount: 0,         // 本局完成轨道的次数
+    targetFlash: 0,        // 目标灯全亮的闪光
     combo: 0,
     comboTimer: 0,
     shake: 0,
     particles: [],
     texts: []
   };
+
+  /** 以“场上的一颗球”形态创建（多球模式共用） */
+  function makeBall(x, y, vx, vy) {
+    return {
+      x: x,
+      y: y,
+      vx: vx || 0,
+      vy: vy || 0,
+      r: CONFIG.ballRadius,
+      trail: [],
+      rail: null,              // 非空表示正在弧形轨道上滑行
+      ready: false,            // true = 停在发射口等待蓄力
+      stuckRefX: x,
+      stuckRefY: y,
+      stuckTime: 0,
+      stuckCount: 0
+    };
+  }
 
   /* =========================================================================
    * 6. 碰撞处理
@@ -772,7 +891,7 @@
         game.shake = Math.max(game.shake, 4);
         game.texts.push({ x: o.x, y: o.y - 28, life: 0.9, max: 0.9, text: '点亮', color: '#a8ff3e', size: 15 });
 
-        // 两盏全亮 → 加 500 并重置
+        // 全部亮起 → 加分 + 奖励 1 颗备用球，然后重置所有灯
         let all = true;
         for (let k = 0; k < TARGETS.length; k++) if (!TARGETS[k].lit) all = false;
         if (all) {
@@ -781,8 +900,13 @@
             TARGETS[k].cool = 0.9;
           }
           addScore(CONFIG.targetScore, W / 2, 300, '#ffd166');
-          game.texts.push({ x: W / 2, y: 256, life: 1.5, max: 1.5, text: '全部点亮 +500', color: '#ffd166', size: 22 });
+          game.lives += CONFIG.extraBall;
+          syncHUD(true);
+          game.texts.push({ x: W / 2, y: 256, life: 1.7, max: 1.7, text: '全部点亮 +500', color: '#ffd166', size: 22 });
+          game.texts.push({ x: W / 2, y: 284, life: 1.7, max: 1.7, text: '奖励 1 球', color: '#7ef9ff', size: 17 });
           burst(W / 2, 300, '#ffd166', 44, 430);
+          // 灯全部亮起的瞬间抬高整组灯的光效
+          game.targetFlash = 1;
           Sound.bonus();
           game.shake = 11;
         }
@@ -944,36 +1068,166 @@
   }
 
   /* =========================================================================
-   * 7. 物理主循环（固定步长 + 子步）
+   * 7. 弧形轨道 + 物理主循环（固定步长 + 子步）
    * ========================================================================= */
-  function simulate(step) {
-    const b = game.ball;
-    if (!b) return;
-    const n = CONFIG.substeps;
-    const h = step / n;
+
+  /** 尝试让球“飞进”轨道入口：在喇叭口内 + 速度够 + 方向顺着轨道 */
+  function tryEnterOrbit(b) {
+    if (b.rail || b.ready) return false;
+    const e = ORBIT.entry;
+    const dx = b.x - e.x;
+    const dy = b.y - e.y;
+    if (dx * dx + dy * dy > CONFIG.orbitGate * CONFIG.orbitGate) return false;
+
+    const sp = Math.hypot(b.vx, b.vy);
+    if (sp < CONFIG.orbitCaptureSpeed) return false;
+
+    const tg = orbitAt(0);
+    if ((b.vx * tg.tx + b.vy * tg.ty) / sp < CONFIG.orbitGateDot) return false;
+
+    // 贴到最近的路径点上，避免入轨瞬间位置跳变
+    const t0 = Math.min(orbitProject(b.x, b.y), 0.08);
+    const p = orbitAt(t0);
+
+    b.rail = {
+      t: t0,
+      speed: clamp(sp * 0.85, CONFIG.orbitMinSpeed, CONFIG.orbitMaxSpeed),
+      node: Math.floor(t0 * CONFIG.orbitPoints)
+    };
+    b.x = p.x;
+    b.y = p.y;
+    b.vx = p.tx * b.rail.speed;
+    b.vy = p.ty * b.rail.speed;
+    b.stuckRefX = b.x;
+    b.stuckRefY = b.y;
+    b.stuckTime = 0;
+
+    ORBIT.flash = 1;
+    Sound.orbitIn();
+    burst(p.x, p.y, '#ffd166', 10, 210);
+    game.texts.push({ x: p.x - 30, y: p.y + 10, life: 0.9, max: 0.9, text: '进入轨道', color: '#ffd166', size: 13 });
+    return true;
+  }
+
+  /**
+   * 轨道上的球：位置完全由参数 t 决定（路径点线性插值），
+   * 每跨过一个计分点加一次分，走完全程从另一头甩出
+   */
+  function stepOrbit(b, dt) {
+    const r = b.rail;
+    r.t += (r.speed * dt) / ORBIT.total;
+
+    // 计分点
+    const node = Math.min(CONFIG.orbitPoints, Math.floor(r.t * CONFIG.orbitPoints));
+    while (r.node < node) {
+      r.node += 1;
+      const np = orbitAt(r.node / CONFIG.orbitPoints);
+      addScore(CONFIG.orbitScore, np.x, np.y, '#ffd166');
+      Sound.orbitStep();
+      burst(np.x, np.y, '#ffd166', 3, 90);
+    }
+
+    if (r.t >= 1) { releaseOrbit(b); return; }
+
+    const p = orbitAt(r.t);
+    b.x = p.x;
+    b.y = p.y;
+    b.vx = p.tx * r.speed;
+    b.vy = p.ty * r.speed;
+  }
+
+  /** 出轨道：沿末端切向甩出，并结算奖励 */
+  function releaseOrbit(b) {
+    const p = orbitAt(1);
+    b.rail = null;
+    b.x = p.x;
+    b.y = p.y;
+
+    const sp = CONFIG.orbitSpeed * 0.62;
+    b.vx = p.tx * sp;
+    b.vy = p.ty * sp;
+    b.stuckRefX = b.x;
+    b.stuckRefY = b.y;
+    b.stuckTime = 0;
+    b.stuckCount = 0;
+
+    addScore(CONFIG.orbitBonus, p.x + 18, p.y - 14, '#7ef9ff');
+    game.orbitCount += 1;
+    ORBIT.flash = 1;
+    burst(p.x, p.y, '#7ef9ff', 24, 330);
+    game.texts.push({ x: p.x + 44, y: p.y + 14, life: 1.2, max: 1.2, text: '完整轨道', color: '#7ef9ff', size: 15 });
+    Sound.orbitDone();
+    game.shake = Math.max(game.shake, 5);
+
+    startMultiball(p);
+  }
+
+  /** 多球模式：只在单球状态下触发，从出口位置放出额外弹珠 */
+  function startMultiball(from) {
+    if (game.multiballCool > 0) return;
+    if (game.balls.length !== 1) return;      // 已经是多球就不再追加
+    const n = Math.min(CONFIG.multiballExtra, CONFIG.maxBallsOnField - game.balls.length);
+    if (n <= 0) return;
+    const base = Math.atan2(from.ty, from.tx);
+    const px = -from.ty;
+    const py = from.tx;
 
     for (let i = 0; i < n; i++) {
-      // 重力 + 阻尼
-      b.vy += CONFIG.gravity * h;
-      const damp = Math.pow(CONFIG.airDrag, h * 60);
-      b.vx *= damp;
-      b.vy *= damp;
-      limitSpeed(b, CONFIG.maxSpeed);
+      const off = (i - (n - 1) / 2) * 34;
+      const ang = base + (i - (n - 1) / 2) * 0.24;
+      const sp = rand(430, 560);
+      game.balls.push(makeBall(
+        from.x + px * off - from.tx * 10,
+        from.y + py * off - from.ty * 10,
+        Math.cos(ang) * sp,
+        Math.sin(ang) * sp
+      ));
+    }
 
-      // 积分
-      b.x += b.vx * h;
-      b.y += b.vy * h;
+    game.multiballCool = CONFIG.multiballCool;
+    game.multiballCount += 1;
+    game.texts.push({ x: W / 2, y: 214, life: 2.0, max: 2.0, text: '多球模式 ×' + game.balls.length, color: '#ff7bee', size: 24 });
+    burst(W / 2, 232, '#ff7bee', 30, 380);
+    Sound.multiball();
+    game.shake = 13;
+  }
 
-      // 依次求解碰撞
-      collideWalls(b);
-      collideArc(b);
-      collideBumpers(b);
-      collidePegs(b);
-      collideTargets(b);
-      collideSlings(b);
-      collideFlipper(b, leftFlipper);
-      collideFlipper(b, rightFlipper);
-      antiStuck(b, h);
+  function simulate(step) {
+    const n = CONFIG.substeps;
+    const h = step / n;
+    const list = game.balls;
+
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i];
+      // 轨道上的球不再受重力和碰撞影响，整段步长一次推进
+      if (b.rail) { stepOrbit(b, step); continue; }
+
+      for (let k = 0; k < n; k++) {
+        // 重力 + 阻尼
+        b.vy += CONFIG.gravity * h;
+        const damp = Math.pow(CONFIG.airDrag, h * 60);
+        b.vx *= damp;
+        b.vy *= damp;
+        limitSpeed(b, CONFIG.maxSpeed);
+
+        // 积分
+        b.x += b.vx * h;
+        b.y += b.vy * h;
+
+        // 依次求解碰撞
+        collideWalls(b);
+        collideArc(b);
+        collideBumpers(b);
+        collidePegs(b);
+        collideTargets(b);
+        collideSlings(b);
+        collideFlipper(b, leftFlipper);
+        collideFlipper(b, rightFlipper);
+
+        // 入轨检测放在碰撞之后，避免刚被弹开就被“吸”进轨道
+        if (tryEnterOrbit(b)) break;
+        antiStuck(b, h);
+      }
     }
   }
 
@@ -1019,18 +1273,10 @@
    * 9. 状态流转
    * ========================================================================= */
   function newBall() {
-    game.ball = {
-      x: BALL_START.x,
-      y: BALL_START.y,
-      vx: 0,
-      vy: 0,
-      r: CONFIG.ballRadius,
-      trail: [],
-      stuckRefX: BALL_START.x,
-      stuckRefY: BALL_START.y,
-      stuckTime: 0,
-      stuckCount: 0
-    };
+    const b = makeBall(BALL_START.x, BALL_START.y, 0, 0);
+    b.ready = true;
+    game.balls.length = 0;
+    game.balls.push(b);
     game.power = 0;
     game.charging = false;
     game.acc = 0;
@@ -1044,33 +1290,53 @@
 
   function startGame() {
     game.score = 0;
-    game.balls = CONFIG.startBalls;
+    game.lives = CONFIG.startBalls;
     game.combo = 0;
     game.comboTimer = 0;
     game.shake = 0;
+    game.multiballCool = 0;
+    game.multiballCount = 0;
+    game.orbitCount = 0;
+    game.targetFlash = 0;
     game.particles.length = 0;
     game.texts.length = 0;
     for (let i = 0; i < BUMPERS.length; i++) { BUMPERS[i].pulse = 0; BUMPERS[i].cool = 0; }
     for (let i = 0; i < PEGS.length; i++) { PEGS[i].cool = 0; }
     for (let i = 0; i < TARGETS.length; i++) { TARGETS[i].lit = false; TARGETS[i].cool = 0; }
     for (let i = 0; i < SLINGS.length; i++) SLINGS[i].flash = 0;
+    ORBIT.flash = 0;
     leftFlipper.angle = leftFlipper.restAngle;
     rightFlipper.angle = rightFlipper.restAngle;
     newBall();
   }
 
-  function drainBall() {
-    const b = game.ball;
-    if (b) burst(b.x, Math.min(b.y, H - 12), '#ff4c6e', 20, 320);
+  /** 移除场上的一颗球；掉光后进入扣球流程 */
+  function removeBall(b) {
+    const i = game.balls.indexOf(b);
+    if (i < 0) return;
+    game.balls.splice(i, 1);
+    burst(b.x, Math.min(b.y, H - 12), '#ff4c6e', 18, 300);
+
+    if (game.balls.length === 0) {
+      loseBall();
+    } else {
+      // 多球模式下掉一颗不扣命，只提示
+      Sound.ballLost();
+      game.texts.push({ x: b.x, y: H - 70, life: 0.8, max: 0.8, text: '球 ' + game.balls.length, color: '#ff8fa6', size: 13 });
+    }
+  }
+
+  /** 场上球全部掉光 → 扣 1 颗备球 */
+  function loseBall() {
     Sound.drain();
-    game.ball = null;
     game.combo = 0;
     game.comboTimer = 0;
     game.charging = false;
-    game.balls -= 1;
+    game.power = 0;
+    game.lives -= 1;
     syncHUD(true);
 
-    if (game.balls <= 0) {
+    if (game.lives <= 0) {
       gameOver();
     } else {
       game.respawn = 0.65;
@@ -1079,7 +1345,7 @@
 
   function gameOver() {
     game.state = 'OVER';
-    game.ball = null;
+    game.balls.length = 0;
     if (game.score > game.best) {
       game.best = game.score;
       saveBest();
@@ -1096,12 +1362,13 @@
   }
 
   function fireBall() {
-    const b = game.ball;
+    const b = game.balls[0];
     if (!b) return;
     const p = clamp(game.power, 0, 1);
     const speed = CONFIG.launchMinSpeed + (CONFIG.launchMaxSpeed - CONFIG.launchMinSpeed) * p;
     b.vx = Math.cos(CONFIG.launchAngle) * speed;
     b.vy = Math.sin(CONFIG.launchAngle) * speed;
+    b.ready = false;
     game.power = 0;
     game.charging = false;
     game.state = 'PLAYING';
@@ -1115,6 +1382,7 @@
     if (game.state === 'OVER') { startGame(); return; }
     if (game.state === 'PAUSED') return;
     if (game.state !== 'READY') return;
+    if (!game.balls.length) return;
     if (game.charging) return;
     game.charging = true;
     game.power = 0;
@@ -1163,6 +1431,9 @@
     for (let i = 0; i < PEGS.length; i++) if (PEGS[i].cool > 0) PEGS[i].cool -= dt;
     for (let i = 0; i < TARGETS.length; i++) if (TARGETS[i].cool > 0) TARGETS[i].cool -= dt;
     for (let i = 0; i < SLINGS.length; i++) if (SLINGS[i].flash > 0) SLINGS[i].flash = Math.max(0, SLINGS[i].flash - dt * 3.4);
+    if (game.multiballCool > 0) game.multiballCool = Math.max(0, game.multiballCool - dt);
+    if (game.targetFlash > 0) game.targetFlash = Math.max(0, game.targetFlash - dt * 1.6);
+    if (ORBIT.flash > 0) ORBIT.flash = Math.max(0, ORBIT.flash - dt * 2.2);
 
     // 蓄力
     if (game.state === 'READY' && game.charging) {
@@ -1170,7 +1441,7 @@
     }
 
     // 物理
-    if (game.state === 'PLAYING' && game.ball) {
+    if (game.state === 'PLAYING' && game.balls.length) {
       game.acc += dt;
       let guard = 0;
       while (game.acc >= CONFIG.fixedStep && guard < 8) {
@@ -1180,13 +1451,12 @@
       }
       if (guard >= 8) game.acc = 0;
 
-      const b = game.ball;
-      if (b) {
-        // 记录拖尾
+      // 拖尾 + 掉球判定（倒序遍历，移除后不影响索引）
+      for (let i = game.balls.length - 1; i >= 0; i--) {
+        const b = game.balls[i];
         b.trail.push({ x: b.x, y: b.y });
         if (b.trail.length > 12) b.trail.shift();
-        // 掉球判定
-        if (b.y > H - 24) drainBall();
+        if (!b.rail && b.y > H - 24) removeBall(b);
       }
     }
 
@@ -1336,6 +1606,114 @@
     ctx.restore();
   }
 
+  /**
+   * 弧形轨道：深色底槽 + 两条发光导轨 + 流动箭头 + 入口/出口喇叭口
+   * 绘制在缓冲器之后，看起来像是架在台面上方的一圈“高架轨道”
+   */
+  function drawOrbit() {
+    const f = ORBIT.flash;
+    const now = performance.now();
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // 底槽
+    ctx.beginPath();
+    for (let i = 0; i < ORBIT.pts.length; i++) {
+      const p = ORBIT.pts[i];
+      if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    }
+    ctx.strokeStyle = 'rgba(10,22,42,0.88)';
+    ctx.lineWidth = 19;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(70,170,235,0.07)';
+    ctx.lineWidth = 11;
+    ctx.stroke();
+
+    // 导轨（内外各一条）
+    for (let k = 0; k < 2; k++) {
+      const rr = ORBIT.r + (k === 0 ? -10 : 10);
+      ctx.beginPath();
+      ctx.arc(ORBIT.cx, ORBIT.cy, rr, ORBIT.a0, ORBIT.a1, true);
+      ctx.strokeStyle = 'rgba(120,225,255,' + (0.26 + f * 0.45) + ')';
+      ctx.shadowColor = 'rgba(90,220,255,0.95)';
+      ctx.shadowBlur = 9 + f * 22;
+      ctx.lineWidth = k === 0 ? 2.2 : 1.5;
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    // 流动箭头（指示行进方向）
+    const phase = (now / 2600) % 1;
+    ctx.strokeStyle = 'rgba(150,235,255,' + (0.26 + f * 0.35) + ')';
+    ctx.lineWidth = 1.8;
+    for (let i = 0; i < 7; i++) {
+      const t = (i / 7 + phase) % 1;
+      if (t < 0.02 || t > 0.98) continue;
+      const p = orbitAt(t);
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(Math.atan2(p.ty, p.tx));
+      ctx.beginPath();
+      ctx.moveTo(-3.4, -4.6);
+      ctx.lineTo(2.6, 0);
+      ctx.lineTo(-3.4, 4.6);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 入口 / 出口喇叭口
+    const pulse = 0.55 + 0.45 * Math.sin(now / 330);
+    for (let k = 0; k < 2; k++) {
+      const isEntry = k === 0;
+      const p = isEntry ? ORBIT.entry : ORBIT.exit;
+      const tg = isEntry ? orbitAt(0) : orbitAt(1);
+      const flip = isEntry ? 1 : -1;
+
+      // 口部的虚线光环
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 21, 0, TAU);
+      ctx.setLineDash([4, 6]);
+      ctx.lineDashOffset = now / 90;
+      ctx.strokeStyle = 'rgba(255,200,90,' + (0.18 + pulse * 0.22) + ')';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(Math.atan2(tg.ty, tg.tx));
+      ctx.scale(flip, 1);
+
+      // 喇叭口填充：看起来是轨道端头的一个开口
+      ctx.beginPath();
+      ctx.moveTo(-9, -18);
+      ctx.lineTo(5, -9);
+      ctx.lineTo(5, 9);
+      ctx.lineTo(-9, 18);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(3,7,15,0.92)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,209,102,' + (0.42 + pulse * 0.4) + ')';
+      ctx.shadowColor = 'rgba(255,190,80,0.95)';
+      ctx.shadowBlur = 12;
+      ctx.lineWidth = 2.2;
+      ctx.stroke();
+      ctx.restore();
+
+      // 口部光点
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3.6 + pulse * 1.4, 0, TAU);
+      ctx.fillStyle = 'rgba(255,232,170,' + (0.35 + pulse * 0.45) + ')';
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
   function drawTargets() {
     const spin = performance.now() / 900;
     for (let i = 0; i < TARGETS.length; i++) {
@@ -1359,6 +1737,10 @@
       ctx.save();
       ctx.shadowColor = lit ? '#a8ff3e' : 'rgba(80,140,200,0.55)';
       ctx.shadowBlur = lit ? 30 : 8;
+      if (game.targetFlash > 0) {
+        ctx.shadowColor = '#ffe08a';
+        ctx.shadowBlur = 18 + game.targetFlash * 34;
+      }
       ctx.beginPath();
       ctx.arc(t.x, t.y, t.r, 0, TAU);
       ctx.fillStyle = lit ? 'rgba(168,255,62,0.95)' : 'rgba(14,24,40,0.95)';
@@ -1502,9 +1884,10 @@
   }
 
   function drawBall() {
-    const b = game.ball;
-    if (!b) return;
+    for (let i = 0; i < game.balls.length; i++) drawOneBall(game.balls[i]);
+  }
 
+  function drawOneBall(b) {
     // 拖尾
     for (let i = 0; i < b.trail.length; i++) {
       const p = b.trail[i];
@@ -1515,9 +1898,17 @@
       ctx.fill();
     }
 
+    // 轨道上的球多一层暖色光晕，暗示“高架通过”
+    if (b.rail) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r + 7, 0, TAU);
+      ctx.fillStyle = 'rgba(255,210,120,0.16)';
+      ctx.fill();
+    }
+
     ctx.save();
-    ctx.shadowColor = '#7ef9ff';
-    ctx.shadowBlur = 26;
+    ctx.shadowColor = b.rail ? '#ffd166' : '#7ef9ff';
+    ctx.shadowBlur = b.rail ? 30 : 26;
     const g = ctx.createRadialGradient(b.x - 3, b.y - 4, 1, b.x, b.y, b.r);
     g.addColorStop(0, '#ffffff');
     g.addColorStop(0.5, '#bff6ff');
@@ -1561,8 +1952,8 @@
 
   /** 发射前的瞄准线 + 力度环 */
   function drawAim() {
-    const b = game.ball;
-    if (!b) return;
+    const b = game.balls[0];
+    if (!b || !b.ready) return;
     const p = game.power;
     const a = CONFIG.launchAngle;
     const len = 70 + p * 170;
@@ -1602,19 +1993,31 @@
 
   function drawHints() {
     if (game.state === 'READY') {
-      const msg = '按住 空格 / 发射 键蓄力 · 松开发射';
+      const l1 = '按住 空格 / 发射 键蓄力 · 松开发射';
+      const l2 = '点亮全部目标灯 +1 球 · 走完弧形轨道触发多球';
+      const FONT = 'system-ui, "PingFang SC", "Microsoft YaHei", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.font = '600 13px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif';
-      const w = ctx.measureText(msg).width + 26;
+
+      ctx.font = '600 13px ' + FONT;
+      const w1 = ctx.measureText(l1).width;
+      ctx.font = '600 11px ' + FONT;
+      const w2 = ctx.measureText(l2).width;
+      const w = Math.max(w1, w2) + 26;
+
       // 半透明底衬，保证文字在任何背景下都清晰
       ctx.beginPath();
-      roundRect(W / 2 - w / 2, 676 - 12, w, 24, 12);
-      ctx.fillStyle = 'rgba(4,8,16,0.62)';
+      roundRect(W / 2 - w / 2, 626, w, 50, 12);
+      ctx.fillStyle = 'rgba(4,8,16,0.58)';
       ctx.fill();
-      ctx.fillStyle = 'rgba(160,205,250,0.9)';
-      ctx.fillText(msg, W / 2, 676);
-    } else if (game.state === 'PLAYING' && !game.ball) {
+
+      ctx.font = '600 13px ' + FONT;
+      ctx.fillStyle = 'rgba(170,212,255,0.95)';
+      ctx.fillText(l1, W / 2, 641);
+      ctx.font = '600 11px ' + FONT;
+      ctx.fillStyle = 'rgba(255,205,120,0.8)';
+      ctx.fillText(l2, W / 2, 662);
+    } else if (game.state === 'PLAYING' && !game.balls.length) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.font = '600 15px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif';
@@ -1654,6 +2057,7 @@
     drawTargets();
     drawPegs();
     drawBumpers();
+    drawOrbit();
     drawSlings();
     drawFlippers();
     if (game.state === 'READY') drawAim();
@@ -1681,9 +2085,9 @@
       uiCache.best = game.best;
       uiEl.best.textContent = String(game.best);
     }
-    if (force || uiCache.balls !== game.balls) {
-      uiCache.balls = game.balls;
-      uiEl.balls.textContent = String(Math.max(0, game.balls));
+    if (force || uiCache.balls !== game.lives) {
+      uiCache.balls = game.lives;
+      uiEl.balls.textContent = String(Math.max(0, game.lives));
     }
   }
 
