@@ -78,7 +78,9 @@
 
       var sw = document.createElement('span');
       sw.className = 'sw';
-      sw.style.background = 'linear-gradient(135deg,' + def.theme.bumper + ' 0%,' + def.accent + ' 55%,' + def.theme.bg.mid + ' 100%)';
+      sw.style.background = def.theme.bg.mid;
+      // 缩略图不是色块，是母题的缩写：网格 / 拱券 / 晶格
+      sw.innerHTML = PB.Motifs.thumb(def);
 
       var cm = document.createElement('span');
       cm.className = 'cm';
@@ -154,7 +156,9 @@
   ui.showPause = function () {
     overlayShow({
       title: '已暂停',
-      text: '当前台面 <span class="key">' + PB.table.name + '</span><br>按 <span class="key">P</span> 或下方按钮继续',
+      text: '当前台面 <span class="key">' + PB.table.name + '</span><br>' +
+            '图形母题 <span class="key">' + PB.Motifs.of(PB.table).name + '</span><br>' +
+            '按 <span class="key">P</span> 或下方按钮继续',
       btn: '继续',
       action: function () { G.togglePause(); },
       alt: { text: '返回选台', action: function () { G.toMenu(); } }

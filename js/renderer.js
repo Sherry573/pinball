@@ -60,6 +60,7 @@
   /** 底部结构三角（无碰撞，仅视觉上封住墙角） */
   function drawCorners(t) {
     var th = t.theme;
+    var m = PB.Motifs.of(t);
     for (var i = 0; i < t.corners.length; i++) {
       var p = t.corners[i];
       ctx.beginPath();
@@ -92,6 +93,9 @@
         ctx.lineTo(p[0].x + k + 90, p[0].y + 90);
         ctx.stroke();
       }
+
+      // 结构角也归母题管：加劲肋 / 台阶 / 铆接板
+      if (m.cornerDetail) m.cornerDetail(ctx, t, p);
       ctx.restore();
     }
   }
@@ -154,6 +158,7 @@
   function drawBars(t) {
     if (!t.bars.length) return;
     var th = t.theme;
+    var m = PB.Motifs.of(t);
     ctx.save();
     ctx.lineCap = 'round';
 
@@ -216,125 +221,45 @@
     }
     ctx.stroke();
     ctx.restore();
+
+    // 母题细节：车线凹槽 + 柱帽（只给需要它的台面实现）
+    if (m.barDetail) {
+      for (i = 0; i < t.bars.length; i++) m.barDetail(ctx, t.bars[i], t);
+    }
+  }
+
+  /* ==================================================== 母题层（图形语言） */
+
+  /** 台面上的"活眼"：雷达扫掠 / 柱廊走光 / 约束场扫描 —— 每帧只几条描边 */
+  function drawMotifFloor(t) {
+    var m = PB.Motifs.of(t);
+    if (m.floor) m.floor(ctx, t, performance.now());
+  }
+
+  /** 刻在墙板上的细节：量规刻度 / 檐口齿饰 / 装甲接缝 */
+  function drawMotifWalls(t) {
+    var m = PB.Motifs.of(t);
+    if (m.walls) m.walls(ctx, t, performance.now());
   }
 
   /* ================================================================ 元件 */
 
+  /** 目标灯：形状语言完全交给台面母题（表盘 / 宝石 / 晶胞） */
   function drawTargets(t) {
-    var th = t.theme;
-    var spin = performance.now() / 900;
-    var now = performance.now();
-
-    for (var i = 0; i < t.targets.length; i++) {
-      var o = t.targets[i];
-      var lit = o.lit;
-      // 未点亮时轻微呼吸，提示"这里可以打亮"
-      var breathe = 0.5 + 0.5 * Math.sin(now / 620 + i * 1.7);
-
-      // 旋转虚线圈（灯座）
-      ctx.save();
-      ctx.translate(o.x, o.y);
-      ctx.rotate(spin * (i % 2 === 0 ? 1 : -1));
-      ctx.beginPath();
-      ctx.arc(0, 0, o.r + 8, 0, TAU);
-      ctx.setLineDash([5, 7]);
-      ctx.lineWidth = 1.6;
-      ctx.strokeStyle = lit ? U.rgba(th.target, 0.95) : U.rgba(th.target, 0.26 + breathe * 0.22);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.restore();
-
-      // 玻璃灯体
-      ctx.save();
-      if (lit || o.flash > 0) {
-        ctx.shadowColor = th.target;
-        ctx.shadowBlur = lit ? 30 : 16;
-      } else {
-        ctx.shadowColor = th.target;
-        ctx.shadowBlur = 5 + breathe * 7;
-      }
-      var g = ctx.createRadialGradient(o.x - o.r * 0.35, o.y - o.r * 0.4, o.r * 0.1, o.x, o.y, o.r);
-      if (lit) {
-        g.addColorStop(0, 'rgba(255,255,255,0.98)');
-        g.addColorStop(0.45, th.target);
-        g.addColorStop(1, U.darken(th.target, 0.42));
-      } else {
-        g.addColorStop(0, 'rgba(196,224,246,0.55)');
-        g.addColorStop(0.34, U.rgba(th.target, 0.30));
-        g.addColorStop(0.8, 'rgba(18,30,46,0.96)');
-        g.addColorStop(1, 'rgba(8,14,24,0.98)');
-      }
-      ctx.beginPath();
-      ctx.arc(o.x, o.y, o.r, 0, TAU);
-      ctx.fillStyle = g;
-      ctx.fill();
-      ctx.restore();
-
-      // 金属压边
-      ctx.beginPath();
-      ctx.arc(o.x, o.y, o.r, 0, TAU);
-      ctx.lineWidth = 2.4;
-      ctx.strokeStyle = lit ? 'rgba(245,255,235,0.9)' : U.rgba(th.target, 0.55);
-      ctx.stroke();
-
-      // 顶部玻璃反光
-      ctx.beginPath();
-      ctx.arc(o.x, o.y, o.r * 0.78, Math.PI * 1.05, Math.PI * 1.62);
-      ctx.strokeStyle = 'rgba(255,255,255,' + (lit ? 0.75 : 0.22) + ')';
-      ctx.lineWidth = 1.6;
-      ctx.stroke();
-
-      // 灯芯
-      ctx.beginPath();
-      ctx.arc(o.x, o.y, o.r * 0.32, 0, TAU);
-      ctx.fillStyle = lit ? '#fbffe8' : U.rgba(th.target, 0.55);
-      ctx.fill();
-    }
+    var m = PB.Motifs.of(t);
+    for (var i = 0; i < t.targets.length; i++) m.target(ctx, t.targets[i], t, i);
   }
 
+  /** 钉子：同上，半球 / 铆钉 / 六角螺母 */
   function drawPegs(t) {
-    var th = t.theme;
-    for (var i = 0; i < t.pegs.length; i++) {
-      var p = t.pegs[i];
-
-      // 落在台面上的接触阴影
-      ctx.beginPath();
-      ctx.ellipse(p.x + 1.2, p.y + 2.2, p.r * 0.95, p.r * 0.8, 0, 0, TAU);
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fill();
-
-      // 外圈柔光
-      var halo = ctx.createRadialGradient(p.x, p.y, p.r * 0.4, p.x, p.y, p.r * 2.6);
-      halo.addColorStop(0, U.rgba(th.peg, 0.30 + p.flash * 0.45));
-      halo.addColorStop(1, U.rgba(th.peg, 0));
-      ctx.fillStyle = halo;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r * 2.6, 0, TAU);
-      ctx.fill();
-
-      // 镀铬半球
-      var g = ctx.createRadialGradient(p.x - p.r * 0.35, p.y - p.r * 0.45, 0.5, p.x, p.y, p.r);
-      g.addColorStop(0, '#ffffff');
-      g.addColorStop(0.42, th.peg);
-      g.addColorStop(1, 'rgba(40,60,80,0.95)');
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, TAU);
-      ctx.fillStyle = g;
-      ctx.fill();
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = 'rgba(10,18,28,0.85)';
-      ctx.stroke();
-
-      // 高光点
-      ctx.beginPath();
-      ctx.arc(p.x - p.r * 0.3, p.y - p.r * 0.38, p.r * 0.3, 0, TAU);
-      ctx.fillStyle = 'rgba(255,255,255,0.9)';
-      ctx.fill();
-    }
+    var m = PB.Motifs.of(t);
+    for (var i = 0; i < t.pegs.length; i++) m.peg(ctx, t.pegs[i], t);
   }
 
   function drawBumpers(t) {
     var th = t.theme;
+    var m = PB.Motifs.of(t);
+    var now = performance.now();
     for (var i = 0; i < t.bumpers.length; i++) {
       var o = t.bumpers[i];
       var p = o.pulse;
@@ -413,6 +338,9 @@
       ctx.strokeStyle = 'rgba(255,255,255,' + (0.45 + p * 0.4) + ')';
       ctx.lineWidth = 2.2;
       ctx.stroke();
+
+      // 压环的母题语言：靶环 / 六角螺母 / 涡流
+      m.bumperBezel(ctx, o, r, t, p, now);
     }
   }
 
@@ -477,6 +405,7 @@
     var th = t.theme;
     var f = orbit.flash;
     var now = performance.now();
+    var m = PB.Motifs.of(t);
 
     ctx.save();
     ctx.lineCap = 'round';
@@ -508,24 +437,8 @@
     }
     ctx.shadowBlur = 0;
 
-    // 行进方向箭头
-    var phase = (now / 2600) % 1;
-    ctx.strokeStyle = U.rgba(th.orbit, 0.26 + f * 0.35);
-    ctx.lineWidth = 1.8;
-    for (var a = 0; a < 7; a++) {
-      var tt = (a / 7 + phase) % 1;
-      if (tt < 0.02 || tt > 0.98) continue;
-      var pp = PB.Tables.orbitAt(orbit, tt);
-      ctx.save();
-      ctx.translate(pp.x, pp.y);
-      ctx.rotate(Math.atan2(pp.ty, pp.tx));
-      ctx.beginPath();
-      ctx.moveTo(-3.4, -4.6);
-      ctx.lineTo(2.6, 0);
-      ctx.lineTo(-3.4, 4.6);
-      ctx.stroke();
-      ctx.restore();
-    }
+    // 行进方向标记：语法交给母题（箭头 / 双层箭头 / 径向栅格）
+    m.orbitMarks(ctx, orbit, t, f, now);
 
     // 进出口喇叭
     var pulse = 0.55 + 0.45 * Math.sin(now / 330);
@@ -924,7 +837,9 @@
     drawSurface();
     drawDrainZone(t);
     drawCorners(t);
+    drawMotifFloor(t);
     drawWalls(t);
+    drawMotifWalls(t);
     drawTargets(t);
     drawPegs(t);
     drawBumpers(t);

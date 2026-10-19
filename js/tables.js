@@ -36,7 +36,8 @@
       id: 'classic',
       name: '霓虹经典',
       brand: 'NEON CLASSIC',
-      tag: '对称四缓冲 · 顶部环形轨道',
+      motif: 'draft',
+      tag: '正交网格 · 同心刻线 · 四缓冲',
       accent: '#45f3ff',
       arc: { cx: 240, cy: 220, r: 210 },
 
@@ -89,7 +90,8 @@
       id: 'gallery',
       name: '熔金回廊',
       brand: 'GOLDEN GALLERY',
-      tag: '导流斜墙 · 长弧轨道',
+      motif: 'arcade',
+      tag: '柱廊拱券 · 斜向导流 · 长弧轨道',
       accent: '#ffb454',
       arc: { cx: 240, cy: 220, r: 210 },
 
@@ -145,7 +147,8 @@
       id: 'abyss',
       name: '深渊之核',
       brand: 'ABYSS CORE',
-      tag: '五瓣缓冲 · 密集钉阵',
+      motif: 'core',
+      tag: '六角晶格 · 放射核心 · 五瓣缓冲',
       accent: '#5df2c0',
       arc: { cx: 240, cy: 220, r: 210 },
 
@@ -279,6 +282,7 @@
       id: def.id,
       name: def.name,
       brand: def.brand,
+      motif: def.motif,
       tag: def.tag,
       accent: def.accent,
       theme: def.theme,

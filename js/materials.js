@@ -62,16 +62,16 @@
   }
 
   function weave(g, theme) {
-    // 碳纤编织：±45° 细网格 + 交替的格心暗块
+    // 金箔压花：稀疏的 ±45° 压线 + 大尺度方格，避免细密网格带来的"帆布感"
     g.save();
     g.lineWidth = 1;
-    for (var i = -H; i < W + H; i += 7) {
-      g.strokeStyle = 'rgba(255,255,255,0.018)';
+    for (var i = -H; i < W + H; i += 11) {
+      g.strokeStyle = 'rgba(255,255,255,0.012)';
       g.beginPath();
       g.moveTo(i, 0);
       g.lineTo(i + H, H);
       g.stroke();
-      g.strokeStyle = 'rgba(0,0,0,0.16)';
+      g.strokeStyle = 'rgba(0,0,0,0.09)';
       g.beginPath();
       g.moveTo(i, 0);
       g.lineTo(i - H, H);
@@ -79,11 +79,11 @@
     }
     g.restore();
 
-    for (var x = 0; x < W; x += 14) {
-      for (var y = 0; y < H; y += 14) {
-        if (((x / 14) + (y / 14)) % 2 === 0) {
-          g.fillStyle = 'rgba(255,255,255,0.014)';
-          g.fillRect(x, y, 14, 14);
+    for (var x = 0; x < W; x += 28) {
+      for (var y = 0; y < H; y += 28) {
+        if (((x / 28) + (y / 28)) % 2 === 0) {
+          g.fillStyle = 'rgba(255,255,255,0.009)';
+          g.fillRect(x, y, 28, 28);
         }
       }
     }
@@ -143,13 +143,10 @@
     else if (th.surface === 'nebula') nebula(g, th, table.accent);
     else brushed(g, th);
 
-    /* 3. 网格（工程感刻度，极低透明度） */
-    g.strokeStyle = th.grid;
-    g.lineWidth = 1;
-    g.beginPath();
-    for (var x = 30; x <= 450; x += 30) { g.moveTo(x, -BLEED); g.lineTo(x, H + BLEED); }
-    for (var y = -BLEED; y <= H + BLEED; y += 30) { g.moveTo(-BLEED, y); g.lineTo(W + BLEED, y); }
-    g.stroke();
+    /* 3. 图形母题：网格 / 条带 / 晶格 + 台面专属装饰（见 motifs.js）
+     *    这是"骨架级差异"的主载体 —— 三张台面在这里就已经是三种图形语法了 */
+    var motif = PB.Motifs.of(table);
+    motif.surface(g, table);
 
     /* 4. 顶部环境光 + 底部压暗（让台面像一块有厚度的板） */
     var tg = g.createRadialGradient(240, 130, 10, 240, 130, 300);
